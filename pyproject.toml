@@ -1,0 +1,35 @@
+[project]
+  name            = "camera-footage-fs"
+  version         = "0.1.0"
+  description     = "Public ingress spoke for the office SFTPGo server: relays SFTP and the web client over the WireGuard tunnel"
+  readme          = "README.md"
+  requires-python = ">=3.14"
+  dependencies    = []
+
+  [project.scripts]
+    run-app-camera-footage-fs = "camera_footage_fs.__main__:run_app"
+
+[dependency-groups]
+  dev = ["aeth-devkit"]
+
+[build-system]
+  requires      = ["uv_build>=0.11.2,<0.12.0"]
+  build-backend = "uv_build"
+
+[tool.docker]
+  services                = ["camera-footage-fs"]
+  required_persisted_dirs = ["persisted_data"]
+  wireguard               = true
+
+[tool.poe]
+  include_script = [{ script = "aeth_devkit:tasks", executor = { type = "uv", frozen = true } }]
+
+[tool.uv]
+  [tool.uv.sources]
+    aeth-devkit = [{ index = "SFTPyPI" }]
+
+  [[tool.uv.index]]
+    name        = "SFTPyPI"
+    url         = "https://pypi.sweetfiretobacco.com/jacob.ogden/internal/+simple"
+    publish-url = "https://pypi.sweetfiretobacco.com/jacob.ogden/internal/"
+    explicit    = true
