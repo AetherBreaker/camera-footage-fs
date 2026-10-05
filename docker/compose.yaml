@@ -1,0 +1,41 @@
+services:
+  camera-footage-fs:
+    container_name: camera-footage-fs
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+      args:
+        GIT_REPO: 
+        GIT_TAG: v0.1.0
+    restart: no
+    volumes:
+      - type: bind
+        source: /data/camera_footage_fs_files
+        target: /app/persisted_data
+    environment:
+      - HEARTBEAT_SLUG=camera-footage-fs
+      - WG_PRIVATE_KEY=${WG_PRIVATE_KEY:?}
+      - WG_HUB_URL=${WG_HUB_URL:?}
+      - WG_HUB_REPO=${WG_HUB_REPO:?}
+      - WG_HUB_TOKEN=${WG_HUB_TOKEN:-}
+    cap_add:
+      - NET_ADMIN
+    networks:
+      - coolify
+    healthcheck:
+      test:
+        - CMD
+        - /app/.venv/bin/devkit-container
+        - healthcheck
+        - --file
+        - /app/persisted_data/logs/heartbeat.txt
+        - --file
+        - /app/persisted_data/logs/wireguard-heartbeat.txt
+      start_period: 90s
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+networks:
+  coolify:
+    external: true
