@@ -14,18 +14,24 @@ The hub forwards only `10.8.0.23` → `10.8.0.22` on TCP 2022 and 8090.
 - **2022, SFTP:** honours PROXY headers from `10.8.0.23` only. LAN clients without a header still connect.
 - **8080, admin:** the web admin and REST API, office LAN only. No proxy header is trusted, and Windows Firewall keeps it off the tunnel.
 - **8090, web client:** reached only through the ingress. The REST API is off here because it carries the admin token and password-reset endpoints. It reads the client IP from the rightmost `X-Forwarded-For` entry, which Traefik appends, and only from `10.8.0.23`.
-- **Defender:** enabled.
+- **Defender:** left at its default, which is off.
 
 Users, groups, folders and admins live in SFTPGo's database, not in this file, and are managed in the admin UI. Its backups hold password hashes, so they never go in this public repo.
 
-Windows Firewall, from an administrator PowerShell. The tunnel interface is classed Public, so the tunnel rule needs every profile, and the admin rule is limited to Domain and Private to keep it off the tunnel:
+### Applying it
 
-```powershell
-New-NetFirewallRule -DisplayName "SFTPGo via cffs ingress" -Direction Inbound -Protocol TCP -LocalPort 2022,8090 -RemoteAddress 10.8.0.23 -Profile Any -Action Allow
-New-NetFirewallRule -DisplayName "SFTPGo admin (office LAN)" -Direction Inbound -Protocol TCP -LocalPort 8080 -RemoteAddress LocalSubnet -Profile Domain,Private -Action Allow
-```
+From an administrator PowerShell on the PC, run `sftpgo\Apply-CffsConfig.ps1`. It:
 
-If the office LAN adapter is classed Public, the admin rule won't match. That fails closed: admin access is blocked, not exposed. Remove any broader rule for these ports that an installer added.
+- installs the config, keeping a backup of the old one;
+- removes the installer's firewall rule;
+- adds the port rules;
+- restarts the service.
+
+Run it right after installing SFTPGo, before creating the first admin, and again after every SFTPGo upgrade.
+
+The installer adds a firewall rule named `SFTPGo Service`. It allows `sftpgo.exe` inbound on every port and profile, from any address, which would override the port rules, and every install or upgrade re-creates it. That's why the script needs re-running after upgrades. Until the first admin exists, anyone who can reach 8080 can create it.
+
+Admin (8080) defaults to `LocalSubnet`, on the Domain and Private profiles only. Windows classes the tunnel interface Public, so the rule never applies to it. If the office LAN is also classed Public, admin access is blocked, not exposed. Pass `-AdminRemoteAddress <ip>`, such as a Tailscale address, to allow one stable address on every profile instead.
 
 ## Deploying
 
