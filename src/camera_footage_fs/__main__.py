@@ -40,7 +40,7 @@ def proxy_v2_header(src: tuple[str, int], dst: tuple[str, int]) -> bytes:
   if src_ip.version != dst_ip.version:
     # One address block holds one family, so a mixed pair is widened to v6.
     src_ip, dst_ip = ipaddress.IPv6Address(f"::ffff:{src_ip}"), ipaddress.IPv6Address(f"::ffff:{dst_ip}")
-  family = 0x11 if src_ip.version == 4 else 0x21  # AF_INET or AF_INET6, STREAM
+  family = 0x11 if isinstance(src_ip, ipaddress.IPv4Address) else 0x21  # AF_INET or AF_INET6, STREAM
   body = src_ip.packed + dst_ip.packed + struct.pack("!HH", src[1], dst[1])
   return PROXY_V2_SIGNATURE + bytes([0x21, family]) + struct.pack("!H", len(body)) + body
 
@@ -109,9 +109,9 @@ async def main() -> None:
   sftp = await asyncio.start_server(on_sftp, "0.0.0.0", SFTP_PORT)
   web = await asyncio.start_server(on_web, "0.0.0.0", WEB_PORT)
   log.info("relaying :%d and :%d to %s", SFTP_PORT, WEB_PORT, UPSTREAM)
-  HEARTBEAT_FILE.parent.mkdir(parents=True, exist_ok=True)
   while not stop.is_set():
-    HEARTBEAT_FILE.write_text(datetime.now().isoformat(timespec="seconds"), encoding="utf-8")  # noqa: DTZ005 - read as container-local
+    beat = datetime.now().isoformat(timespec="seconds")  # noqa: DTZ005 - the healthcheck reads a bare timestamp as container-local
+    await asyncio.to_thread(HEARTBEAT_FILE.write_text, beat, encoding="utf-8")
     with contextlib.suppress(TimeoutError):
       await asyncio.wait_for(stop.wait(), BEAT_SECS)
   for server in (sftp, web):
@@ -124,6 +124,7 @@ async def main() -> None:
 def run_app() -> None:
   """Entry point for `run-app-camera-footage-fs`."""
   logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+  HEARTBEAT_FILE.parent.mkdir(parents=True, exist_ok=True)
   asyncio.run(main())
 
 

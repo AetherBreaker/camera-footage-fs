@@ -5,7 +5,7 @@ services:
       context: .
       dockerfile: docker/Dockerfile
       args:
-        GIT_REPO: 
+        GIT_REPO: https://github.com/AetherBreaker/camera-footage-fs.git
         GIT_TAG: v0.1.0
     restart: no
     volumes:
@@ -20,6 +20,9 @@ services:
       - WG_HUB_TOKEN=${WG_HUB_TOKEN:-}
     cap_add:
       - NET_ADMIN
+    # SFTP is published directly: no SNI, so Traefik can't route it. The web client's 8090 is
+    # never published; Traefik reaches it over `coolify` (Coolify domain https://cffs.sweetfiretobacco.com:8090).
+    ports: ["2022:2022"]
     networks:
       - coolify
     healthcheck:
