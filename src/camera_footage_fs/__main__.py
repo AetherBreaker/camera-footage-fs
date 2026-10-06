@@ -3,8 +3,10 @@
 SFTP connections get a PROXY protocol v2 header written here from the real peer address, so a
 sibling on `coolify` cannot spoof one. The web port accepts only Traefik (`coolify-proxy`, resolved
 per connection since its address changes on restart), since SFTPGo trusts `X-Forwarded-For` from
-this spoke and anything else reaching 8090 could forge it. The heartbeat is a bare timestamp the
-devkit healthcheck reads; the supervisor owns the healthchecks.io ping.
+this spoke and anything else reaching 8090 could forge it. The upstream's address is the
+`UPSTREAM_PEER` row of the hub's peer table, which the supervisor caches and rewrites on every hub
+release; it's read per connection so a re-addressed peer applies without a restart. The heartbeat
+is a bare timestamp the devkit healthcheck reads; the supervisor owns the healthchecks.io ping.
 """
 
 # Standard library imports
@@ -15,10 +17,12 @@ import logging
 import signal
 import struct
 import time
+import tomllib
 from datetime import datetime
 from pathlib import Path
 
-UPSTREAM = "10.8.0.22"
+UPSTREAM_PEER = "cffs-pc"
+PEERS_CACHE = Path("/app/persisted_data/wireguard/peers.toml")
 SFTP_PORT = 2022
 WEB_PORT = 8090
 TRAEFIK_HOST = "coolify-proxy"
@@ -61,9 +65,17 @@ async def relay(client_r: asyncio.StreamReader, client_w: asyncio.StreamWriter, 
   peer, local = client_w.get_extra_info("peername"), client_w.get_extra_info("sockname")
   started = time.monotonic()
   try:
-    up_r, up_w = await asyncio.wait_for(asyncio.open_connection(UPSTREAM, port), CONNECT_TIMEOUT_SECS)
+    table = tomllib.loads(await asyncio.to_thread(PEERS_CACHE.read_text, encoding="utf-8"))
+    row = next(p for p in table.get("peers", []) if p.get("name") == UPSTREAM_PEER)
+    upstream = str(ipaddress.ip_interface(row["address"]).ip)
+  except (OSError, ValueError, KeyError, StopIteration) as e:
+    log.warning("%s:%d -> :%d refused: no address for %s in %s: %r", peer[0], peer[1], port, UPSTREAM_PEER, PEERS_CACHE, e)
+    client_w.close()
+    return
+  try:
+    up_r, up_w = await asyncio.wait_for(asyncio.open_connection(upstream, port), CONNECT_TIMEOUT_SECS)
   except (OSError, TimeoutError) as e:
-    log.warning("%s:%d -> :%d upstream %s:%d unreachable: %r", peer[0], peer[1], port, UPSTREAM, port, e)
+    log.warning("%s:%d -> :%d upstream %s:%d unreachable: %r", peer[0], peer[1], port, upstream, port, e)
     client_w.close()
     return
   if send_proxy_header:
@@ -108,7 +120,7 @@ async def main() -> None:
     loop.add_signal_handler(sig, stop.set)
   sftp = await asyncio.start_server(on_sftp, "0.0.0.0", SFTP_PORT)
   web = await asyncio.start_server(on_web, "0.0.0.0", WEB_PORT)
-  log.info("relaying :%d and :%d to %s", SFTP_PORT, WEB_PORT, UPSTREAM)
+  log.info("relaying :%d and :%d to %s", SFTP_PORT, WEB_PORT, UPSTREAM_PEER)
   while not stop.is_set():
     beat = datetime.now().isoformat(timespec="seconds")  # noqa: DTZ005 - the healthcheck reads a bare timestamp as container-local
     await asyncio.to_thread(HEARTBEAT_FILE.write_text, beat, encoding="utf-8")
