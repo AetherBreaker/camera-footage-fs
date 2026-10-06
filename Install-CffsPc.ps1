@@ -134,7 +134,22 @@ param(
   Assert-Exit 'uv tool install wireguard-spoke-agent'
 
   $keyTarget = Join-Path $AgentHome "$Peer.key"
-  if (-not $PrivateKeyFile -and -not (Test-Path $keyTarget)) { $PrivateKeyFile = Read-Host "Path to $Peer.key" }
+  if (-not $PrivateKeyFile -and -not (Test-Path $keyTarget)) {
+    Write-Host "Select $Peer.key in the file picker"
+    try {
+      Add-Type -AssemblyName System.Windows.Forms
+      $dialog = [Windows.Forms.OpenFileDialog]@{ Title = "Select $Peer.key"; Filter = 'WireGuard key (*.key)|*.key|All files (*.*)|*.*' }
+      # A topmost owner keeps the picker from opening behind the console.
+      $owner = [Windows.Forms.Form]@{ TopMost = $true }
+      if ($dialog.ShowDialog($owner) -eq 'OK') { $PrivateKeyFile = $dialog.FileName }
+      $owner.Dispose()
+    } catch {
+      # No desktop session, or an MTA host (PowerShell 7) where the dialog can't open.
+      Write-Warning "The file picker could not open: $($_.Exception.Message)"
+    }
+    if (-not $PrivateKeyFile) { $PrivateKeyFile = Read-Host "Path to $Peer.key" }
+    if (-not $PrivateKeyFile) { throw "No $Peer.key given." }
+  }
   if ($PrivateKeyFile) {
     # Copy then delete, not move: a moved file keeps its old ACL instead of the locked folder's.
     Copy-Item $PrivateKeyFile $keyTarget -Force
