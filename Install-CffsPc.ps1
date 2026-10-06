@@ -75,15 +75,20 @@ param(
   $config = (Invoke-WebRequest -UseBasicParsing "https://raw.githubusercontent.com/$Repo/$Version/sftpgo/sftpgo.json").Content
   $null = $config | ConvertFrom-Json  # refuse a malformed file before touching anything
   $target = Join-Path $SftpgoDir 'sftpgo.json'
-  if (Test-Path $target) {
-    $backup = "$target.bak-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
-    Copy-Item $target $backup
-    Write-Host "Backed up the old SFTPGo config to $backup"
-    # The timestamped names sort chronologically; keep the newest 5.
-    Get-ChildItem -Path $SftpgoDir -Filter 'sftpgo.json.bak-*' | Sort-Object Name -Descending | Select-Object -Skip 5 | Remove-Item
+  $configChanged = -not ((Test-Path $target) -and [IO.File]::ReadAllText($target) -ceq $config)
+  if (-not $configChanged) {
+    Write-Host "$target already matches $Version"
+  } else {
+    if (Test-Path $target) {
+      $backup = "$target.bak-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
+      Copy-Item $target $backup
+      Write-Host "Backed up the old SFTPGo config to $backup"
+      # The timestamped names sort chronologically; keep the newest 5.
+      Get-ChildItem -Path $SftpgoDir -Filter 'sftpgo.json.bak-*' | Sort-Object Name -Descending | Select-Object -Skip 5 | Remove-Item
+    }
+    [IO.File]::WriteAllText($target, $config, [Text.UTF8Encoding]::new($false))
+    Write-Host "Installed $target from $Version"
   }
-  [IO.File]::WriteAllText($target, $config, [Text.UTF8Encoding]::new($false))
-  Write-Host "Installed $target from $Version"
 
   $installerRule = Get-NetFirewallRule -DisplayName 'SFTPGo Service' -ErrorAction SilentlyContinue
   if ($installerRule) {
@@ -101,8 +106,14 @@ param(
     Get-NetFirewallRule | Where-Object { $_.Group -ne $Group -and $_.Enabled -eq 'True' -and $_.Direction -eq 'Inbound' -and $_.Action -eq 'Allow' }
   foreach ($r in $others) { Write-Warning "Another enabled inbound rule also opens one of these ports: '$($r.DisplayName)'" }
 
-  Restart-Service -Name 'SFTPGo'
-  Write-Host "Restarted SFTPGo; status: $((Get-Service -Name 'SFTPGo').Status)"
+  # Only a config change needs a restart, which drops active SFTP sessions; firewall rules apply live.
+  if ($configChanged) {
+    Restart-Service -Name 'SFTPGo'
+    Write-Host "Restarted SFTPGo; status: $((Get-Service -Name 'SFTPGo').Status)"
+  } elseif ((Get-Service -Name 'SFTPGo').Status -ne 'Running') {
+    Start-Service -Name 'SFTPGo'
+    Write-Host 'Started SFTPGo, which was not running'
+  }
 
   # ---- 2. WireGuard, through wireguard-spoke-agent ----
   New-Item -ItemType Directory -Force (Join-Path $AgentHome 'logs') | Out-Null
