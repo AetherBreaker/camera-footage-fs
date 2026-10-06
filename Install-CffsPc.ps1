@@ -201,4 +201,22 @@ param(
   & (Join-Path $env:UV_TOOL_BIN_DIR 'wireguard-spoke-agent.exe') install
   Assert-Exit 'wireguard-spoke-agent install'
   Write-Host "Done. The agent's log is $(Join-Path $AgentHome 'logs\agent.log')."
+
+  # ---- Where to reach the admin UI ----
+  # LAN addresses only: not loopback, link-local, or the tunnel (whose interface is named after the peer).
+  $lan = Get-NetIPAddress -AddressFamily IPv4 |
+    Where-Object { $_.InterfaceAlias -ne $Peer -and $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.254.*' }
+  Write-Host ''
+  Write-Host 'SFTPGo admin UI (the first visit creates the admin account; do it now, any LAN device can until then):'
+  Write-Host '  On this PC:  http://localhost:8080/web/admin'
+  foreach ($a in $lan) {
+    $category = (Get-NetConnectionProfile -InterfaceIndex $a.InterfaceIndex -ErrorAction SilentlyContinue).NetworkCategory
+    if (-not $category) { continue }  # no network profile: a virtual switch (Hyper-V, WSL), not the LAN
+    $line = "  From the LAN: http://$($a.IPAddress):8080/web/admin  ($($a.InterfaceAlias), $category)"
+    if ($adminProfile -ne 'Any' -and $category -eq 'Public') {
+      Write-Warning "$line is blocked: Windows classes that network Public. Set it Private with: Set-NetConnectionProfile -InterfaceAlias '$($a.InterfaceAlias)' -NetworkCategory Private"
+    } else {
+      Write-Host $line
+    }
+  }
 }
