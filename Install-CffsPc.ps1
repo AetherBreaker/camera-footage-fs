@@ -79,6 +79,8 @@ param(
     $backup = "$target.bak-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
     Copy-Item $target $backup
     Write-Host "Backed up the old SFTPGo config to $backup"
+    # The timestamped names sort chronologically; keep the newest 5.
+    Get-ChildItem -Path $SftpgoDir -Filter 'sftpgo.json.bak-*' | Sort-Object Name -Descending | Select-Object -Skip 5 | Remove-Item
   }
   [IO.File]::WriteAllText($target, $config, [Text.UTF8Encoding]::new($false))
   Write-Host "Installed $target from $Version"
