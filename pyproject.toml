@@ -1,6 +1,6 @@
 [project]
   name            = "camera-footage-fs"
-  version         = "0.1.2"
+  version         = "0.1.3"
   description     = "Public ingress spoke for the office SFTPGo server: relays SFTP and the web client over the WireGuard tunnel"
   readme          = "README.md"
   requires-python = ">=3.14"
