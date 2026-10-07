@@ -1,8 +1,8 @@
 """The app `run-app-camera-footage-fs`: relays SFTP and the SFTPGo web client to the office PC over the tunnel.
 
 SFTP connections get a PROXY protocol v2 header written here from the real peer address, so a
-sibling on `coolify` cannot spoof one. The web port accepts only Traefik (`coolify-proxy`, resolved
-per connection since its address changes on restart), since SFTPGo trusts `X-Forwarded-For` from
+sibling on `coolify` cannot spoof one. The web port accepts only Traefik (`coolify-proxy`, checked by
+reverse DNS per connection since its addresses change on restart), since SFTPGo trusts `X-Forwarded-For` from
 this spoke and anything else reaching 8090 could forge it. The upstream's address is the
 `UPSTREAM_PEER` row of the hub's peer table, which the supervisor caches and rewrites on every hub
 release; it's read per connection so a re-addressed peer applies without a restart. The heartbeat
@@ -100,12 +100,14 @@ async def on_sftp(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) ->
 async def on_web(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
   """Web client: relay only connections from Traefik, untouched so its `X-Forwarded-For` reaches SFTPGo."""
   peer = writer.get_extra_info("peername")
+  # Reverse lookup, not forward: Coolify also joins Traefik to each project's own network and it
+  # connects from there, while a forward lookup answers only its `coolify` address. Docker's DNS
+  # names the container on any shared network, and container names are unique per host.
   try:
-    infos = await asyncio.get_running_loop().getaddrinfo(TRAEFIK_HOST, None)
-    allowed = {info[4][0] for info in infos}
+    name, _ = await asyncio.get_running_loop().getnameinfo((peer[0], 0))
   except OSError:
-    allowed = set()
-  if peer[0] not in allowed:
+    name = ""
+  if name.split(".")[0] != TRAEFIK_HOST:
     log.warning("%s:%d -> :%d refused: not %s", peer[0], peer[1], WEB_PORT, TRAEFIK_HOST)
     writer.close()
     return
