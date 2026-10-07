@@ -14,6 +14,9 @@ services:
         target: /app/persisted_data
     environment:
       - HEARTBEAT_SLUG=camera-footage-fs
+      - ALERTS_EMAIL=info@sweetfiretobacco.com
+      - ALERTS_EMAIL_PWD=${ALERTS_EMAIL_PWD:?}
+      - ALERTS_RECIPIENTS=["jacob.ogden@sweetfiretobacco.com"]
       - WG_PRIVATE_KEY=${WG_PRIVATE_KEY:?}
       - WG_HUB_URL=${WG_HUB_URL:?}
       - WG_HUB_REPO=${WG_HUB_REPO:?}

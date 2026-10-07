@@ -21,6 +21,7 @@ import tomllib
 from datetime import datetime
 from pathlib import Path
 
+PROJECT_NAME = "camera-footage-fs"  # read by aeth-ext's logging setup
 UPSTREAM_PEER = "cffs-pc"
 PEERS_CACHE = Path("/app/persisted_data/wireguard/peers.toml")
 SFTP_PORT = 2022
@@ -137,7 +138,12 @@ async def main() -> None:
 
 def run_app() -> None:
   """Entry point for `run-app-camera-footage-fs`."""
-  logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+  # First party imports
+  from aeth_ext import initialize
+
+  # Logs go to central-log-server. Its signal handlers are skipped: main() owns SIGINT/SIGTERM
+  # through the event loop, which would replace them anyway.
+  initialize(asyncio=True, logging="socket", install_signal_handlers=False)
   HEARTBEAT_FILE.parent.mkdir(parents=True, exist_ok=True)
   asyncio.run(main())
 
