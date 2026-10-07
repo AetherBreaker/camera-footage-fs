@@ -89,7 +89,7 @@ wheels = [
 
 [[package]]
 name = "camera-footage-fs"
-version = "0.1.4"
+version = "1.0.0"
 source = { editable = "." }
 dependencies = [
     { name = "aeth-ext", extra = ["async"] },
