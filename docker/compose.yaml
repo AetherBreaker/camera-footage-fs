@@ -6,7 +6,7 @@ services:
       dockerfile: docker/Dockerfile
       args:
         GIT_REPO: https://github.com/AetherBreaker/camera-footage-fs.git
-        GIT_TAG: v0.1.4
+        GIT_TAG: v1.0.0
     restart: no
     volumes:
       - type: bind
