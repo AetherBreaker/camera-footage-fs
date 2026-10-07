@@ -10,16 +10,19 @@ is a bare timestamp the devkit healthcheck reads; the supervisor owns the health
 """
 
 # Standard library imports
-import asyncio
-import contextlib
-import ipaddress
-import logging
-import signal
-import struct
-import time
-import tomllib
+from asyncio import run
+from asyncio.events import get_running_loop
+from asyncio.streams import StreamReader, StreamWriter, open_connection, start_server
+from asyncio.tasks import FIRST_COMPLETED, create_task, gather, wait, wait_for
+from asyncio.threads import to_thread
+from contextlib import suppress
 from datetime import datetime
+from ipaddress import IPv4Address, IPv6Address, ip_address, ip_interface
+from logging import getLogger
 from pathlib import Path
+from struct import pack
+from time import monotonic
+from tomllib import loads
 
 PROJECT_NAME = "camera-footage-fs"  # read by aeth-ext's logging setup
 UPSTREAM_PEER = "cffs-pc"
@@ -32,28 +35,28 @@ BEAT_SECS = 60
 HEARTBEAT_FILE = Path("/app/persisted_data/logs/heartbeat.txt")
 PROXY_V2_SIGNATURE = b"\r\n\r\n\x00\r\nQUIT\n"
 
-log = logging.getLogger("camera_footage_fs")
+log = getLogger("camera_footage_fs")
 
 
 def proxy_v2_header(src: tuple[str, int], dst: tuple[str, int]) -> bytes:
   """A PROXY v2 `PROXY` command for a TCP stream from `src` to `dst`."""
-  src_ip, dst_ip = ipaddress.ip_address(src[0]), ipaddress.ip_address(dst[0])
-  if isinstance(src_ip, ipaddress.IPv6Address) and src_ip.ipv4_mapped:
+  src_ip, dst_ip = ip_address(src[0]), ip_address(dst[0])
+  if isinstance(src_ip, IPv6Address) and src_ip.ipv4_mapped:
     src_ip = src_ip.ipv4_mapped
-  if isinstance(dst_ip, ipaddress.IPv6Address) and dst_ip.ipv4_mapped:
+  if isinstance(dst_ip, IPv6Address) and dst_ip.ipv4_mapped:
     dst_ip = dst_ip.ipv4_mapped
   if src_ip.version != dst_ip.version:
     # One address block holds one family, so a mixed pair is widened to v6.
-    src_ip, dst_ip = ipaddress.IPv6Address(f"::ffff:{src_ip}"), ipaddress.IPv6Address(f"::ffff:{dst_ip}")
-  family = 0x11 if isinstance(src_ip, ipaddress.IPv4Address) else 0x21  # AF_INET or AF_INET6, STREAM
-  body = src_ip.packed + dst_ip.packed + struct.pack("!HH", src[1], dst[1])
-  return PROXY_V2_SIGNATURE + bytes([0x21, family]) + struct.pack("!H", len(body)) + body
+    src_ip, dst_ip = IPv6Address(f"::ffff:{src_ip}"), IPv6Address(f"::ffff:{dst_ip}")
+  family = 0x11 if isinstance(src_ip, IPv4Address) else 0x21  # AF_INET or AF_INET6, STREAM
+  body = src_ip.packed + dst_ip.packed + pack("!HH", src[1], dst[1])
+  return PROXY_V2_SIGNATURE + bytes([0x21, family]) + pack("!H", len(body)) + body
 
 
-async def pump(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> int:
+async def pump(reader: StreamReader, writer: StreamWriter) -> int:
   """Copy `reader` to `writer` until EOF or a reset; returns the bytes copied."""
   total = 0
-  with contextlib.suppress(ConnectionError):
+  with suppress(ConnectionError):
     while data := await reader.read(65536):
       writer.write(data)
       await writer.drain()
@@ -61,51 +64,51 @@ async def pump(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> in
   return total
 
 
-async def relay(client_r: asyncio.StreamReader, client_w: asyncio.StreamWriter, port: int, *, send_proxy_header: bool) -> None:
+async def relay(client_r: StreamReader, client_w: StreamWriter, port: int, *, send_proxy_header: bool) -> None:
   """Open the upstream on `port`, relay both ways until either side ends, then close both and log once."""
   peer, local = client_w.get_extra_info("peername"), client_w.get_extra_info("sockname")
-  started = time.monotonic()
+  started = monotonic()
   try:
-    table = tomllib.loads(await asyncio.to_thread(PEERS_CACHE.read_text, encoding="utf-8"))
+    table = loads(await to_thread(PEERS_CACHE.read_text, encoding="utf-8"))
     row = next(p for p in table.get("peers", []) if p.get("name") == UPSTREAM_PEER)
-    upstream = str(ipaddress.ip_interface(row["address"]).ip)
+    upstream = str(ip_interface(row["address"]).ip)
   except (OSError, ValueError, KeyError, StopIteration) as e:
     log.warning("%s:%d -> :%d refused: no address for %s in %s: %r", peer[0], peer[1], port, UPSTREAM_PEER, PEERS_CACHE, e)
     client_w.close()
     return
   try:
-    up_r, up_w = await asyncio.wait_for(asyncio.open_connection(upstream, port), CONNECT_TIMEOUT_SECS)
+    up_r, up_w = await wait_for(open_connection(upstream, port), CONNECT_TIMEOUT_SECS)
   except (OSError, TimeoutError) as e:
     log.warning("%s:%d -> :%d upstream %s:%d unreachable: %r", peer[0], peer[1], port, upstream, port, e)
     client_w.close()
     return
   if send_proxy_header:
     up_w.write(proxy_v2_header(peer, local))
-  tasks = [asyncio.create_task(pump(client_r, up_w)), asyncio.create_task(pump(up_r, client_w))]
+  tasks = [create_task(pump(client_r, up_w)), create_task(pump(up_r, client_w))]
   # Either direction ending ends the session: SFTP and HTTP don't rely on half-close here.
-  await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+  await wait(tasks, return_when=FIRST_COMPLETED)
   for w in (up_w, client_w):
     w.close()
   for t in tasks:
     t.cancel()
-  results = await asyncio.gather(*tasks, return_exceptions=True)
+  results = await gather(*tasks, return_exceptions=True)
   sent, received = (r if isinstance(r, int) else 0 for r in results)
-  log.info("%s:%d -> :%d closed after %.0fs, %d B up, %d B down", peer[0], peer[1], port, time.monotonic() - started, sent, received)
+  log.info("%s:%d -> :%d closed after %.0fs, %d B up, %d B down", peer[0], peer[1], port, monotonic() - started, sent, received)
 
 
-async def on_sftp(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+async def on_sftp(reader: StreamReader, writer: StreamWriter) -> None:
   """SFTP: always relay, prefixed with the client's real address."""
   await relay(reader, writer, SFTP_PORT, send_proxy_header=True)
 
 
-async def on_web(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+async def on_web(reader: StreamReader, writer: StreamWriter) -> None:
   """Web client: relay only connections from Traefik, untouched so its `X-Forwarded-For` reaches SFTPGo."""
   peer = writer.get_extra_info("peername")
   # Reverse lookup, not forward: Coolify also joins Traefik to each project's own network and it
   # connects from there, while a forward lookup answers only its `coolify` address. Docker's DNS
   # names the container on any shared network, and container names are unique per host.
   try:
-    name, _ = await asyncio.get_running_loop().getnameinfo((peer[0], 0))
+    name, _ = await get_running_loop().getnameinfo((peer[0], 0))
   except OSError:
     name = ""
   if name.split(".")[0] != TRAEFIK_HOST:
@@ -116,24 +119,26 @@ async def on_web(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> 
 
 
 async def main() -> None:
-  """Serve both listeners and beat until SIGINT or SIGTERM."""
-  stop = asyncio.Event()
-  loop = asyncio.get_running_loop()
-  for sig in (signal.SIGINT, signal.SIGTERM):
-    loop.add_signal_handler(sig, stop.set)
-  sftp = await asyncio.start_server(on_sftp, "0.0.0.0", SFTP_PORT)
-  web = await asyncio.start_server(on_web, "0.0.0.0", WEB_PORT)
+  """Serve both listeners and beat until aeth-ext's `SHUTDOWN` is requested."""
+  # First party imports
+  from aeth_ext.errors.shutdown import SHUTDOWN
+
+  sftp = await start_server(on_sftp, "0.0.0.0", SFTP_PORT)
+  web = await start_server(on_web, "0.0.0.0", WEB_PORT)
   log.info("relaying :%d and :%d to %s", SFTP_PORT, WEB_PORT, UPSTREAM_PEER)
-  while not stop.is_set():
-    beat = datetime.now().isoformat(timespec="seconds")  # noqa: DTZ005 - the healthcheck reads a bare timestamp as container-local
-    await asyncio.to_thread(HEARTBEAT_FILE.write_text, beat, encoding="utf-8")
-    with contextlib.suppress(TimeoutError):
-      await asyncio.wait_for(stop.wait(), BEAT_SECS)
-  for server in (sftp, web):
-    server.close()
-    # wait_closed() waits on open sessions; long SFTP transfers would hold shutdown until SIGKILL.
-    server.close_clients()
-    await server.wait_closed()
+  try:
+    while not SHUTDOWN.is_set():
+      beat = datetime.now().isoformat(timespec="seconds")  # noqa: DTZ005 - the healthcheck reads a bare timestamp as container-local
+      await to_thread(HEARTBEAT_FILE.write_text, beat, encoding="utf-8")
+      with suppress(TimeoutError):
+        await wait_for(SHUTDOWN, BEAT_SECS)
+  finally:
+    # Also reached by aeth-ext's early-exit nudge (a simulated SIGINT, so KeyboardInterrupt here).
+    for server in (sftp, web):
+      server.close()
+      # wait_closed() waits on open sessions; long SFTP transfers would hold shutdown until SIGKILL.
+      server.close_clients()
+      await server.wait_closed()
 
 
 def run_app() -> None:
@@ -141,11 +146,10 @@ def run_app() -> None:
   # First party imports
   from aeth_ext import initialize
 
-  # Logs go to central-log-server. Its signal handlers are skipped: main() owns SIGINT/SIGTERM
-  # through the event loop, which would replace them anyway.
-  initialize(asyncio=True, logging="socket", install_signal_handlers=False)
+  # Logs go to central-log-server; SIGINT/SIGTERM drive aeth-ext's SHUTDOWN, which main() awaits.
+  initialize(asyncio=True, logging="socket")
   HEARTBEAT_FILE.parent.mkdir(parents=True, exist_ok=True)
-  asyncio.run(main())
+  run(main())
 
 
 if __name__ == "__main__":
