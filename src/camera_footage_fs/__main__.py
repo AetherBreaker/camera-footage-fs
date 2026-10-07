@@ -27,6 +27,10 @@ from tomllib import loads
 # Local folder imports
 from .settings import SETTINGS
 
+# Fixed by devkit-container's layout under the persisted folder: the supervisor caches the hub's
+# peer table at the first, and the devkit healthcheck reads the second.
+PEERS_CACHE = SETTINGS.persisted_dir_loc / "wireguard" / "peers.toml"
+HEARTBEAT_FILE = SETTINGS.persisted_dir_loc / "logs" / "heartbeat.txt"
 PROXY_V2_SIGNATURE = b"\r\n\r\n\x00\r\nQUIT\n"
 
 log = getLogger("camera_footage_fs")
@@ -63,13 +67,11 @@ async def relay(client_r: StreamReader, client_w: StreamWriter, port: int, *, se
   peer, local = client_w.get_extra_info("peername"), client_w.get_extra_info("sockname")
   started = monotonic()
   try:
-    table = loads(await to_thread(SETTINGS.peers_cache.read_text, encoding="utf-8"))
+    table = loads(await to_thread(PEERS_CACHE.read_text, encoding="utf-8"))
     row = next(p for p in table.get("peers", []) if p.get("name") == SETTINGS.upstream_peer)
     upstream = str(ip_interface(row["address"]).ip)
   except (OSError, ValueError, KeyError, StopIteration) as e:
-    log.warning(
-      "%s:%d -> :%d refused: no address for %s in %s: %r", peer[0], peer[1], port, SETTINGS.upstream_peer, SETTINGS.peers_cache, e
-    )
+    log.warning("%s:%d -> :%d refused: no address for %s in %s: %r", peer[0], peer[1], port, SETTINGS.upstream_peer, PEERS_CACHE, e)
     client_w.close()
     return
   try:
@@ -144,7 +146,7 @@ async def main() -> None:
   log.info("relaying :%d and :%d to %s", SETTINGS.sftp_port, SETTINGS.web_port, SETTINGS.upstream_peer)
   while not SHUTDOWN.is_set():
     beat = datetime.now().isoformat(timespec="seconds")  # noqa: DTZ005 - the healthcheck reads a bare timestamp as container-local
-    await to_thread(SETTINGS.heartbeat_file.write_text, beat, encoding="utf-8")
+    await to_thread(HEARTBEAT_FILE.write_text, beat, encoding="utf-8")
     with suppress(TimeoutError):
       await wait_for(SHUTDOWN, SETTINGS.beat_secs)
   # Keep the loop alive until the shutdown pass has closed the listeners on it.
@@ -159,7 +161,7 @@ def run_app() -> None:
 
   # Logs go to central-log-server; SIGINT/SIGTERM drive aeth-ext's SHUTDOWN, which main() awaits.
   initialize(asyncio=True, logging="socket")
-  SETTINGS.heartbeat_file.parent.mkdir(parents=True, exist_ok=True)
+  HEARTBEAT_FILE.parent.mkdir(parents=True, exist_ok=True)
   run(main())
 
 
