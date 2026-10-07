@@ -4,7 +4,7 @@ SFTP connections get a PROXY protocol v2 header written here from the real peer 
 sibling on `coolify` cannot spoof one. The web port accepts only Traefik (`coolify-proxy`, checked by
 reverse DNS per connection since its addresses change on restart), since SFTPGo trusts `X-Forwarded-For` from
 this spoke and anything else reaching 8090 could forge it. The upstream's address is the
-`UPSTREAM_PEER` row of the hub's peer table, which the supervisor caches and rewrites on every hub
+`upstream_peer` row of the hub's peer table, which the supervisor caches and rewrites on every hub
 release; it's read per connection so a re-addressed peer applies without a restart. The heartbeat
 is a bare timestamp the devkit healthcheck reads; the supervisor owns the healthchecks.io ping.
 """
@@ -20,20 +20,13 @@ from contextlib import suppress
 from datetime import datetime
 from ipaddress import IPv4Address, IPv6Address, ip_address, ip_interface
 from logging import getLogger
-from pathlib import Path
 from struct import pack
 from time import monotonic
 from tomllib import loads
 
-UPSTREAM_PEER = "cffs-pc"
-PEERS_CACHE = Path("/app/persisted_data/wireguard/peers.toml")
-SFTP_PORT = 2022
-WEB_PORT = 8090
-TRAEFIK_HOST = "coolify-proxy"
-CONNECT_TIMEOUT_SECS = 10
-CLOSE_TIMEOUT_SECS = 5  # inside aeth-ext's 7 s graceful shutdown budget
-BEAT_SECS = 60
-HEARTBEAT_FILE = Path("/app/persisted_data/logs/heartbeat.txt")
+# Local folder imports
+from .settings import SETTINGS
+
 PROXY_V2_SIGNATURE = b"\r\n\r\n\x00\r\nQUIT\n"
 
 log = getLogger("camera_footage_fs")
@@ -70,15 +63,17 @@ async def relay(client_r: StreamReader, client_w: StreamWriter, port: int, *, se
   peer, local = client_w.get_extra_info("peername"), client_w.get_extra_info("sockname")
   started = monotonic()
   try:
-    table = loads(await to_thread(PEERS_CACHE.read_text, encoding="utf-8"))
-    row = next(p for p in table.get("peers", []) if p.get("name") == UPSTREAM_PEER)
+    table = loads(await to_thread(SETTINGS.peers_cache.read_text, encoding="utf-8"))
+    row = next(p for p in table.get("peers", []) if p.get("name") == SETTINGS.upstream_peer)
     upstream = str(ip_interface(row["address"]).ip)
   except (OSError, ValueError, KeyError, StopIteration) as e:
-    log.warning("%s:%d -> :%d refused: no address for %s in %s: %r", peer[0], peer[1], port, UPSTREAM_PEER, PEERS_CACHE, e)
+    log.warning(
+      "%s:%d -> :%d refused: no address for %s in %s: %r", peer[0], peer[1], port, SETTINGS.upstream_peer, SETTINGS.peers_cache, e
+    )
     client_w.close()
     return
   try:
-    up_r, up_w = await wait_for(open_connection(upstream, port), CONNECT_TIMEOUT_SECS)
+    up_r, up_w = await wait_for(open_connection(upstream, port), SETTINGS.connect_timeout_secs)
   except (OSError, TimeoutError) as e:
     log.warning("%s:%d -> :%d upstream %s:%d unreachable: %r", peer[0], peer[1], port, upstream, port, e)
     client_w.close()
@@ -99,7 +94,7 @@ async def relay(client_r: StreamReader, client_w: StreamWriter, port: int, *, se
 
 async def on_sftp(reader: StreamReader, writer: StreamWriter) -> None:
   """SFTP: always relay, prefixed with the client's real address."""
-  await relay(reader, writer, SFTP_PORT, send_proxy_header=True)
+  await relay(reader, writer, SETTINGS.sftp_port, send_proxy_header=True)
 
 
 async def on_web(reader: StreamReader, writer: StreamWriter) -> None:
@@ -112,11 +107,11 @@ async def on_web(reader: StreamReader, writer: StreamWriter) -> None:
     name, _ = await get_running_loop().getnameinfo((peer[0], 0))
   except OSError:
     name = ""
-  if name.split(".")[0] != TRAEFIK_HOST:
-    log.warning("%s:%d -> :%d refused: not %s", peer[0], peer[1], WEB_PORT, TRAEFIK_HOST)
+  if name.split(".")[0] != SETTINGS.traefik_host:
+    log.warning("%s:%d -> :%d refused: not %s", peer[0], peer[1], SETTINGS.web_port, SETTINGS.traefik_host)
     writer.close()
     return
-  await relay(reader, writer, WEB_PORT, send_proxy_header=False)
+  await relay(reader, writer, SETTINGS.web_port, send_proxy_header=False)
 
 
 async def main() -> None:
@@ -125,8 +120,8 @@ async def main() -> None:
   from aeth_ext.errors.shutdown import SHUTDOWN, ShutdownPhase, register_for_shutdown
 
   loop = get_running_loop()
-  sftp = await start_server(on_sftp, "0.0.0.0", SFTP_PORT)
-  web = await start_server(on_web, "0.0.0.0", WEB_PORT)
+  sftp = await start_server(on_sftp, "0.0.0.0", SETTINGS.sftp_port)
+  web = await start_server(on_web, "0.0.0.0", SETTINGS.web_port)
   closed = Event()
 
   async def close_servers() -> None:
@@ -141,17 +136,17 @@ async def main() -> None:
   def close_servers_at_shutdown(_trails: object) -> None:
     """Threaded pass: run `close_servers` on the loop and wait for it, so exit doesn't race it."""
     try:
-      run_coroutine_threadsafe(close_servers(), loop).result(timeout=CLOSE_TIMEOUT_SECS)
+      run_coroutine_threadsafe(close_servers(), loop).result(timeout=SETTINGS.close_timeout_secs)
     except TimeoutError:
-      log.warning("listeners did not close within %ds", CLOSE_TIMEOUT_SECS)
+      log.warning("listeners did not close within %gs", SETTINGS.close_timeout_secs)
 
   register_for_shutdown(close_servers_at_shutdown, phase=ShutdownPhase.THREADED)
-  log.info("relaying :%d and :%d to %s", SFTP_PORT, WEB_PORT, UPSTREAM_PEER)
+  log.info("relaying :%d and :%d to %s", SETTINGS.sftp_port, SETTINGS.web_port, SETTINGS.upstream_peer)
   while not SHUTDOWN.is_set():
     beat = datetime.now().isoformat(timespec="seconds")  # noqa: DTZ005 - the healthcheck reads a bare timestamp as container-local
-    await to_thread(HEARTBEAT_FILE.write_text, beat, encoding="utf-8")
+    await to_thread(SETTINGS.heartbeat_file.write_text, beat, encoding="utf-8")
     with suppress(TimeoutError):
-      await wait_for(SHUTDOWN, BEAT_SECS)
+      await wait_for(SHUTDOWN, SETTINGS.beat_secs)
   # Keep the loop alive until the shutdown pass has closed the listeners on it.
   with suppress(KeyboardInterrupt):  # aeth-ext's early-exit nudge is a simulated SIGINT
     await closed.wait()
@@ -164,7 +159,7 @@ def run_app() -> None:
 
   # Logs go to central-log-server; SIGINT/SIGTERM drive aeth-ext's SHUTDOWN, which main() awaits.
   initialize(asyncio=True, logging="socket")
-  HEARTBEAT_FILE.parent.mkdir(parents=True, exist_ok=True)
+  SETTINGS.heartbeat_file.parent.mkdir(parents=True, exist_ok=True)
   run(main())
 
 

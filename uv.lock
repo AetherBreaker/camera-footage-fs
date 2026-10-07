@@ -94,6 +94,7 @@ source = { editable = "." }
 dependencies = [
     { name = "aeth-ext", extra = ["async"] },
     { name = "devkit-container" },
+    { name = "pydantic" },
     { name = "rich" },
 ]
 
@@ -116,6 +117,7 @@ dev = [
 requires-dist = [
     { name = "aeth-ext", extras = ["async"], specifier = ">=9.0.2", index = "https://pypi.sweetfiretobacco.com/jacob.ogden/internal/+simple" },
     { name = "devkit-container", specifier = ">=2.1.1", index = "https://pypi.sweetfiretobacco.com/jacob.ogden/internal/+simple" },
+    { name = "pydantic", specifier = ">=2.13.5" },
     { name = "rich", specifier = ">=15.0.0" },
 ]
 
