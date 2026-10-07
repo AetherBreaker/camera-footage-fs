@@ -4,7 +4,11 @@
   description     = "Public ingress spoke for the office SFTPGo server: relays SFTP and the web client over the WireGuard tunnel"
   readme          = "README.md"
   requires-python = ">=3.14"
-  dependencies    = ["aeth-ext[async]>=9.0.2", "devkit-container>=2.1.1"]                                                                                    # setup-project added: "devkit-container"
+  dependencies    = [
+    "aeth-ext[async]>=9.0.2",
+    "devkit-container>=2.1.1",
+    "rich>=15.0.0",
+]                                                                                    # setup-project added: "devkit-container"
 
   [project.scripts]
     run-app-camera-footage-fs = "camera_footage_fs.__main__:run_app"

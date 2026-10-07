@@ -24,7 +24,6 @@ from struct import pack
 from time import monotonic
 from tomllib import loads
 
-PROJECT_NAME = "camera-footage-fs"  # read by aeth-ext's logging setup
 UPSTREAM_PEER = "cffs-pc"
 PEERS_CACHE = Path("/app/persisted_data/wireguard/peers.toml")
 SFTP_PORT = 2022
