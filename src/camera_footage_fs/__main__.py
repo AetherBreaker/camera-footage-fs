@@ -10,8 +10,9 @@ is a bare timestamp the devkit healthcheck reads; the supervisor owns the health
 """
 
 # Standard library imports
-from asyncio import run
+from asyncio import run, run_coroutine_threadsafe
 from asyncio.events import get_running_loop
+from asyncio.locks import Event
 from asyncio.streams import StreamReader, StreamWriter, open_connection, start_server
 from asyncio.tasks import FIRST_COMPLETED, create_task, gather, wait, wait_for
 from asyncio.threads import to_thread
@@ -30,6 +31,7 @@ SFTP_PORT = 2022
 WEB_PORT = 8090
 TRAEFIK_HOST = "coolify-proxy"
 CONNECT_TIMEOUT_SECS = 10
+CLOSE_TIMEOUT_SECS = 5  # inside aeth-ext's 7 s graceful shutdown budget
 BEAT_SECS = 60
 HEARTBEAT_FILE = Path("/app/persisted_data/logs/heartbeat.txt")
 PROXY_V2_SIGNATURE = b"\r\n\r\n\x00\r\nQUIT\n"
@@ -120,24 +122,39 @@ async def on_web(reader: StreamReader, writer: StreamWriter) -> None:
 async def main() -> None:
   """Serve both listeners and beat until aeth-ext's `SHUTDOWN` is requested."""
   # First party imports
-  from aeth_ext.errors.shutdown import SHUTDOWN
+  from aeth_ext.errors.shutdown import SHUTDOWN, ShutdownPhase, register_for_shutdown
 
+  loop = get_running_loop()
   sftp = await start_server(on_sftp, "0.0.0.0", SFTP_PORT)
   web = await start_server(on_web, "0.0.0.0", WEB_PORT)
-  log.info("relaying :%d and :%d to %s", SFTP_PORT, WEB_PORT, UPSTREAM_PEER)
-  try:
-    while not SHUTDOWN.is_set():
-      beat = datetime.now().isoformat(timespec="seconds")  # noqa: DTZ005 - the healthcheck reads a bare timestamp as container-local
-      await to_thread(HEARTBEAT_FILE.write_text, beat, encoding="utf-8")
-      with suppress(TimeoutError):
-        await wait_for(SHUTDOWN, BEAT_SECS)
-  finally:
-    # Also reached by aeth-ext's early-exit nudge (a simulated SIGINT, so KeyboardInterrupt here).
+  closed = Event()
+
+  async def close_servers() -> None:
     for server in (sftp, web):
       server.close()
       # wait_closed() waits on open sessions; long SFTP transfers would hold shutdown until SIGKILL.
       server.close_clients()
       await server.wait_closed()
+    closed.set()
+    log.info("listeners closed")
+
+  def close_servers_at_shutdown(_trails: object) -> None:
+    """Threaded pass: run `close_servers` on the loop and wait for it, so exit doesn't race it."""
+    try:
+      run_coroutine_threadsafe(close_servers(), loop).result(timeout=CLOSE_TIMEOUT_SECS)
+    except TimeoutError:
+      log.warning("listeners did not close within %ds", CLOSE_TIMEOUT_SECS)
+
+  register_for_shutdown(close_servers_at_shutdown, phase=ShutdownPhase.THREADED)
+  log.info("relaying :%d and :%d to %s", SFTP_PORT, WEB_PORT, UPSTREAM_PEER)
+  while not SHUTDOWN.is_set():
+    beat = datetime.now().isoformat(timespec="seconds")  # noqa: DTZ005 - the healthcheck reads a bare timestamp as container-local
+    await to_thread(HEARTBEAT_FILE.write_text, beat, encoding="utf-8")
+    with suppress(TimeoutError):
+      await wait_for(SHUTDOWN, BEAT_SECS)
+  # Keep the loop alive until the shutdown pass has closed the listeners on it.
+  with suppress(KeyboardInterrupt):  # aeth-ext's early-exit nudge is a simulated SIGINT
+    await closed.wait()
 
 
 def run_app() -> None:
